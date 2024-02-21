@@ -1,4 +1,4 @@
-# CDK Router Stack
+# AWS ALB to S3 routing using S3 Interface endpoint
 
 This CDK stack sets up an AWS infrastructure to route traffic from an Application Load Balancer (ALB) to an Amazon S3 bucket. It is useful for scenarios where you want to serve private static website content from S3 via an internal domain.
 
