@@ -3,6 +3,7 @@ import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import { IpTarget } from 'aws-cdk-lib/aws-elasticloadbalancingv2-targets';
 import { AnyPrincipal, Effect, PolicyStatement } from 'aws-cdk-lib/aws-iam';
+import { CnameRecord, HostedZone, IHostedZone } from 'aws-cdk-lib/aws-route53';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import {
@@ -20,6 +21,7 @@ export class RouterStack extends Stack {
     super(scope, id, props);
 
     const { domainName } = props;
+    const fqdn = `site1.${domainName}`;
 
     const vpc = this.setupVpc();
 
@@ -33,11 +35,11 @@ export class RouterStack extends Stack {
       networkInterfaceProps
     );
 
-    const bucket = this.createBucket(domainName);
+    const bucket = this.createBucket(fqdn);
 
     this.deployWebsite(bucket);
 
-    this.configureBucketPolicy(bucket, s3VpcEndpoint.vpcEndpointId);
+    this.configureBucketPolicy(bucket, s3VpcEndpoint);
 
     const s3EndpointTargetGroup = this.createS3EndpointTargetGroup(
       vpc,
@@ -46,7 +48,26 @@ export class RouterStack extends Stack {
 
     const alb = this.createApplicationLoadBalancer(vpc);
 
-    this.setupLoadBalancerListeners(alb, s3EndpointTargetGroup, domainName);
+    const hostedZone = this.getHostedZone(domainName);
+    this.configureHostedZoneRecordSet(hostedZone, alb);
+
+    this.setupLoadBalancerListeners(alb, s3EndpointTargetGroup, fqdn);
+  }
+  configureHostedZoneRecordSet(
+    hostedZone: IHostedZone,
+    alb: elbv2.ApplicationLoadBalancer
+  ) {
+    new CnameRecord(this, 'AlbAliasRecord', {
+      zone: hostedZone,
+      recordName: 'site1',
+      domainName: alb.loadBalancerDnsName,
+    });
+  }
+
+  private getHostedZone(domainName: string) {
+    return HostedZone.fromLookup(this, 'ExistingHostedZone', {
+      domainName: domainName,
+    });
   }
 
   private setupVpc(): ec2.IVpc {
@@ -121,6 +142,7 @@ export class RouterStack extends Stack {
       bucketName: domainName,
       publicReadAccess: false,
       removalPolicy: RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
     });
   }
 
@@ -133,28 +155,20 @@ export class RouterStack extends Stack {
 
   private configureBucketPolicy(
     bucket: s3.IBucket,
-    vpcEndpointId: string
+    vpcEndpoint: ec2.InterfaceVpcEndpoint
   ): void {
     const allowAccessToS3 = new PolicyStatement({
-      actions: ['s3:GetObject'],
-      resources: [`${bucket.bucketArn}`, `${bucket.bucketArn}/*`],
+      actions: ['s3:*'],
       effect: Effect.ALLOW,
       principals: [new AnyPrincipal()],
-    });
-
-    const denyAccessToNotVpce = new PolicyStatement({
-      actions: ['s3:*'],
-      effect: Effect.DENY,
-      principals: [new AnyPrincipal()],
-      resources: ['*'],
+      resources: [bucket.arnForObjects('*')],
       conditions: {
-        StringNotEquals: {
-          'aws:sourceVpce': vpcEndpointId,
+        StringEquals: {
+          'aws:sourceVpce': vpcEndpoint.vpcEndpointId,
         },
       },
     });
-
-    bucket.policy?.document.addStatements(allowAccessToS3, denyAccessToNotVpce);
+    bucket.addToResourcePolicy(allowAccessToS3);
   }
 
   private createS3EndpointTargetGroup(
